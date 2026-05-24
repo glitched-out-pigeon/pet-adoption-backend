@@ -31,6 +31,7 @@ class RehomingUpdate(BaseModel):
     status: Optional[str] = None
     reviewed_by: Optional[str] = None
 
+# Get all rehoming applications
 @router.get("/")
 async def get_rehoming_applications():
     conn = await get_connection()
@@ -44,6 +45,7 @@ async def get_rehoming_applications():
     await conn.close()
     return [dict(row) for row in rows]
 
+# Submit a new rehoming application
 @router.post("/")
 async def submit_rehoming_application(data: RehomingCreate):
     conn = await get_connection()
@@ -59,6 +61,7 @@ async def submit_rehoming_application(data: RehomingCreate):
     await conn.close()
     return dict(row)
 
+# Update a rehoming application
 @router.patch("/{application_id}")
 async def update_rehoming_application(application_id: str, data: RehomingUpdate):
     conn = await get_connection()
@@ -87,6 +90,69 @@ async def update_rehoming_application(application_id: str, data: RehomingUpdate)
         raise HTTPException(status_code=404, detail="Application not found")
     return dict(row)
 
+# Approve a rehoming application — moves animal to animals table
+@router.patch("/{application_id}/approve")
+async def approve_rehoming_application(application_id: str):
+    conn = await get_connection()
+
+    rehoming = await conn.fetchrow(
+        "SELECT * FROM rehoming_applications WHERE id = $1", application_id
+    )
+
+    if not rehoming:
+        await conn.close()
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    if rehoming["status"] == "approved":
+        await conn.close()
+        raise HTTPException(status_code=400, detail="Already approved")
+
+    # Insert into animals table
+    animal = await conn.fetchrow(
+        """INSERT INTO animals (name, species, breed, age, description, image_url, is_adopted)
+           VALUES ($1, $2, $3, $4, $5, $6, FALSE) RETURNING *""",
+        rehoming["animal_name"],
+        rehoming["species"],
+        rehoming["breed"],
+        rehoming["age"],
+        rehoming["description"],
+        rehoming["image_url"]
+    )
+
+    # Create an intake record for traceability
+    await conn.execute(
+        """INSERT INTO intake_records (animal_id, intake_type, notes)
+           VALUES ($1, 'surrendered', $2)""",
+        animal["id"],
+        f"Rehomed by {rehoming['owner_name']} ({rehoming['owner_email']}). Reason: {rehoming['reason_for_rehoming'] or 'Not specified'}"
+    )
+
+    # Mark rehoming application as approved
+    await conn.execute(
+        "UPDATE rehoming_applications SET status = 'approved' WHERE id = $1",
+        application_id
+    )
+
+    await conn.close()
+    return {
+        "message": "Animal approved and added to shelter",
+        "animal": dict(animal)
+    }
+
+# Reject a rehoming application
+@router.patch("/{application_id}/reject")
+async def reject_rehoming_application(application_id: str):
+    conn = await get_connection()
+    row = await conn.fetchrow(
+        "UPDATE rehoming_applications SET status = 'rejected' WHERE id = $1 RETURNING *",
+        application_id
+    )
+    await conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return {"message": "Application rejected", "application": dict(row)}
+
+# Delete a rehoming application
 @router.delete("/{application_id}")
 async def delete_rehoming_application(application_id: str):
     conn = await get_connection()
